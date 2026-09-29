@@ -52,6 +52,7 @@ namespace
     F(PFNGLUSEPROGRAMPROC, glUseProgram);                                      \
     F(PFNGLUNIFORMMATRIX4FVPROC, glUniformMatrix4fv);                          \
     F(PFNGLDRAWARRAYSPROC, glDrawArrays);                                      \
+    F(PFNGLDRAWELEMENTSPROC, glDrawElements);                                  \
     F(PFNGLBLENDFUNCPROC, glBlendFunc);                                        \
     F(PFNGLDEPTHMASKPROC, glDepthMask);
 
@@ -274,7 +275,9 @@ create_program(const std::filesystem::path &vertex_shader_path,
     return create_program(vertex_shader.get(), fragment_shader.get());
 }
 
-[[nodiscard]] auto create_vertex_buffer(std::span<const vec3> vertices)
+[[nodiscard]] auto
+create_vertex_and_index_buffers(std::span<const vec3> vertices,
+                                std::span<const std::uint32_t> indices)
 {
     GLuint vao_gl {};
     glGenVertexArrays(1, &vao_gl);
@@ -290,12 +293,19 @@ create_program(const std::filesystem::path &vertex_shader_path,
                  vertices.data(),
                  GL_STATIC_DRAW);
 
+    GLuint ibo_gl {};
+    glGenBuffers(1, &ibo_gl);
+    Unique_handle ibo(ibo_gl, GL_array_deleter {glDeleteBuffers});
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo.get());
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER,
+                 static_cast<GLsizei>(indices.size_bytes()),
+                 indices.data(),
+                 GL_STATIC_DRAW);
+
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(vec3), 0);
     glEnableVertexAttribArray(0);
 
-    glBindVertexArray(0);
-
-    return std::tuple {std::move(vao), std::move(vbo)};
+    return std::tuple {std::move(vao), std::move(vbo), std::move(ibo)};
 }
 
 [[nodiscard]] constexpr float dot(const vec3 &a, const vec3 &b) noexcept
@@ -500,18 +510,23 @@ void run_application()
     // glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glEnable(GL_DEPTH_TEST);
 
-#if 0
-    auto vertices =
-        load_xyz("../../SWISSALTI3D_0.5_XYZ_CHLV95_LN02_2538_1152.xyz");
-#else
-    auto vertices = load_xyz(
-        "../../swissSURFACE3D_Raster_0.5_xyz_CHLV95_LN02_2538_1152.xyz");
-#endif
+    // clang-format off
+    constexpr const char *files[] {
+        "../../geo_data/SWISSALTI3D_0.5_XYZ_CHLV95_LN02_2538_1152.xyz",
+        "../../geo_data/swissSURFACE3D_Raster_0.5_xyz_CHLV95_LN02_2538_1152.xyz",
+        "../../geo_data/swissSURFACE3D_Raster_0.5_xyz_CHLV95_LN02_2532_1152.xyz",
+        "../../geo_data/swissSURFACE3D_Raster_0.5_xyz_CHLV95_LN02_2513_1160.xyz",
+        "../../geo_data/swissSURFACE3D_Raster_0.5_xyz_CHLV95_LN02_2572_1116.xyz",
+        "../../geo_data/swissSURFACE3D_Raster_0.5_xyz_CHLV95_LN02_2622_1110.xyz",
+        "../../geo_data/swissSURFACE3D_Raster_0.5_xyz_CHLV95_LN02_2622_1111.xyz"};
+    // clang-format on
+    constexpr auto file = files[1];
+
+    auto vertices = load_xyz(file);
 
     float min_x {std::numeric_limits<float>::infinity()};
     float min_y {std::numeric_limits<float>::infinity()};
     float min_z {std::numeric_limits<float>::infinity()};
-    float max_x {-std::numeric_limits<float>::infinity()};
     for (const auto &vertex : vertices)
     {
         if (vertex.x < min_x)
@@ -520,20 +535,39 @@ void run_application()
             min_y = vertex.y;
         if (vertex.z < min_z)
             min_z = vertex.z;
-        if (vertex.x > max_x)
-            max_x = vertex.x;
     }
-
-    const auto scale = 1.0f / (max_x - min_x);
     for (auto &vertex : vertices)
     {
-        vertex.x = (vertex.x - min_x) * scale;
-        vertex.y = (vertex.y - min_y) * scale;
-        vertex.z = (vertex.z - min_z) * scale;
+        vertex.x -= min_x;
+        vertex.y -= min_y;
+        vertex.z -= min_z;
     }
 
-    const auto [vao, vbo] = create_vertex_buffer(vertices);
-    glBindVertexArray(vao.get());
+    const auto nx = static_cast<std::uint32_t>(std::sqrt(vertices.size()));
+    const auto ny = nx;
+    std::vector<std::uint32_t> indices;
+    indices.reserve((nx - 1) * (ny - 1) * 6);
+    for (std::uint32_t y {0}; y < ny - 1; ++y)
+    {
+        for (std::uint32_t x {0}; x < nx - 1; ++x)
+        {
+            const auto tl = y * nx + x;
+            const auto tr = y * nx + x + 1;
+            const auto bl = (y + 1) * nx + x;
+            const auto br = (y + 1) * nx + x + 1;
+
+            indices.push_back(tl);
+            indices.push_back(bl);
+            indices.push_back(tr);
+
+            indices.push_back(tr);
+            indices.push_back(bl);
+            indices.push_back(br);
+        }
+    }
+
+    const auto [vao, vbo, ibo] =
+        create_vertex_and_index_buffers(vertices, indices);
 
     if (glfwRawMouseMotionSupported())
     {
@@ -543,11 +577,11 @@ void run_application()
     double mouse_x {};
     double mouse_y {};
     glfwGetCursorPos(window.get(), &mouse_x, &mouse_y);
-    Camera camera {.position = {-1.0f, 0.0f, 0.5f},
+    Camera camera {.position = {0.0f, 0.0f, 30.0f},
                    .yaw = 0.0f,
                    .pitch = 0.0f,
                    .sensitivity = 0.005f,
-                   .speed = 0.5f,
+                   .speed = 8.0f,
                    .last_mouse_x = mouse_x,
                    .last_mouse_y = mouse_y};
 
@@ -624,12 +658,16 @@ void run_application()
         const auto projection_matrix = make_perspective_matrix(
             90.0f / 180.0f * std::numbers::pi_v<float>,
             static_cast<float>(width) / static_cast<float>(height),
-            0.001f);
+            0.01f);
 
         glUniformMatrix4fv(loc_view, 1, GL_FALSE, view_matrix.m);
         glUniformMatrix4fv(loc_projection, 1, GL_FALSE, projection_matrix.m);
 
-        glDrawArrays(GL_POINTS, 0, static_cast<GLsizei>(vertices.size()));
+        // glDrawArrays(GL_POINTS, 0, static_cast<GLsizei>(vertices.size()));
+        glDrawElements(GL_TRIANGLES,
+                       static_cast<GLsizei>(indices.size()),
+                       GL_UNSIGNED_INT,
+                       nullptr);
 
         glfwSwapBuffers(window.get());
 
